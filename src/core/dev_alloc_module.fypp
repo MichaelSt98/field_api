@@ -15,18 +15,39 @@ ${fieldType.useParkind1 (kinds=['JPRM', 'JPRD', 'JPIM', 'JPLM', 'JPIB'])}$
 $:offload_macros.runtime_api_import()
 
 USE, INTRINSIC :: ISO_C_BINDING
+USE MEM_POOL_MODULE, ONLY: MEM_POOL, DEVICE_MEM_BLOCK, DEV_MEM_BLK_INIT, DEV_MEM_BLK_FINAL
+USE FIELD_DEFAULTS_MODULE, ONLY : INIT_MAP_DEVPTR, DEV_POOL_BLOCK_SIZE
+USE FIELD_ABORT_MODULE, ONLY : FIELD_ABORT
 
 IMPLICIT NONE
 
 INTERFACE DEV_ALLOCATE_DIM
 #:for ft in fieldTypeList
-  MODULE PROCEDURE ${ft.name}$_DEV_ALLOCATE_DIM
+  MODULE PROCEDURE ${ft.name}$_DEV_ALLOCATE
+#:endfor
+END INTERFACE
+
+INTERFACE DEV_ALLOCATE
+#:for ft in fieldTypeList
+  MODULE PROCEDURE ${ft.name}$_DEV_ALLOCATE
+#:endfor
+END INTERFACE
+
+INTERFACE DEV_ALLOCATE_POOLED
+#:for ft in fieldTypeList
+  MODULE PROCEDURE ${ft.name}$_DEV_ALLOCATE_POOLED
 #:endfor
 END INTERFACE
 
 INTERFACE DEV_DEALLOCATE
 #:for ft in fieldTypeList
   MODULE PROCEDURE ${ft.name}$_DEV_DEALLOCATE
+#:endfor
+END INTERFACE
+
+INTERFACE DEV_DEALLOCATE_POOLED
+#:for ft in fieldTypeList
+  MODULE PROCEDURE ${ft.name}$_DEV_DEALLOCATE_POOLED
 #:endfor
 END INTERFACE
 
@@ -46,15 +67,62 @@ END INTERFACE
 INTERFACE
 $:offload_macros.dev_malloc_intf(indent=2)
 $:offload_macros.dev_free_intf(indent=2)
+$:offload_macros.map_device_addr_intf(indent=2)
+$:offload_macros.unmap_device_addr_intf(indent=2)
 END INTERFACE
 #:endif
 
+TYPE(MEM_POOL) :: DEVICE_POOL
+INTEGER(KIND=C_INT) :: DEVICE_POOL_DEVICE_ID = -1
+
+PUBLIC :: DEVICE_POOL
+PUBLIC :: DEV_ALLOCATE
+PUBLIC :: DEV_ALLOCATE_POOLED
+PUBLIC :: DEV_DEALLOCATE
+PUBLIC :: DEV_DEALLOCATE_POOLED
+
 CONTAINS
 
+SUBROUTINE MEM_BLK_INIT( SIZE, DATA )
+   INTEGER(C_SIZE_T), INTENT(IN) :: SIZE
+   TYPE(C_PTR), INTENT(OUT) :: DATA
+   INTEGER (KIND=C_INT) :: ERR
+   CHARACTER(LEN=200) :: ERROR_MSG
+#:if defined('WITH_HIC')
+$:offload_macros.runtime_error_decl(symbols=['ISTAT',], indent=3)
+#:endif
+
+#:if defined('WITH_HIC')
+$:offload_macros.dev_malloc(ptr='DATA', size='SIZE', return_val='ISTAT', indent=5)
+   WRITE(ERROR_MSG, '(A,I0,A,I0,A)') &
+     "DEV_ALLOC_MODULE: DEVICE MALLOC FAILED (ERROR ", ISTAT, &
+     ") - SIZE REQUESTED: ", SIZE, " BYTES"
+
+   IF( ISTAT /= 0 )THEN
+     CALL FIELD_ABORT(TRIM(ERROR_MSG))
+   ENDIF
+#:else
+   DATA = C_NULL_PTR
+   CALL FIELD_ABORT('DEVICE MEMORY POOL REQUIRES CUDA OR HIPFORT')
+#:endif
+
+END SUBROUTINE MEM_BLK_INIT
+
+SUBROUTINE MEM_BLK_FINAL( DATA )
+   TYPE(C_PTR), INTENT(INOUT) :: DATA
+#:if defined('WITH_HIC')
+$:offload_macros.runtime_error_decl(symbols=['ISTAT',], indent=3)
+#:endif
+
+#:if defined('WITH_HIC')
+$:offload_macros.dev_free(ptr='DATA', return_val='ISTAT', indent=3)
+#:endif
+
+END SUBROUTINE MEM_BLK_FINAL
 
 #:for ft in fieldTypeList
 
-SUBROUTINE ${ft.name}$_DEV_ALLOCATE_DIM (DEV, UBOUNDS, LBOUNDS, MAP_DEVPTR)
+SUBROUTINE ${ft.name}$_DEV_ALLOCATE (DEV, UBOUNDS, LBOUNDS, MAP_DEVPTR)
 
 USE FIELD_STATISTICS_MODULE
 
@@ -67,6 +135,7 @@ LOGICAL, INTENT(IN) :: MAP_DEVPTR
 
 TYPE (C_PTR) :: PTR
 INTEGER (C_SIZE_T) :: SIZ
+CHARACTER(LEN=200) :: ERROR_MSG
 #:if defined('WITH_HIC')
 $:offload_macros.runtime_error_decl(symbols=['ISTAT',])
 #:endif
@@ -85,6 +154,15 @@ IF(SIZ > 0)THEN
    ELSE
 #:if defined('WITH_HIC')
 $:offload_macros.dev_malloc(ptr='PTR', size='SIZ', return_val='ISTAT', indent=5)
+     WRITE(ERROR_MSG, '(A,I0,A,I0,A)') &
+       "DEV_ALLOC_MODULE: DEVICE MALLOC FAILED (ERROR ", ISTAT, &
+       ") - SIZE REQUESTED: ", SIZ, " BYTES"
+
+     IF( ISTAT /= 0 )THEN
+       CALL FIELD_ABORT(TRIM(ERROR_MSG))
+     ENDIF
+#:else
+     CALL FIELD_ABORT('DEVICE ALLOCATION REQUIRES CUDA OR HIPFORT')
 #:endif
    ENDIF
    
@@ -100,7 +178,85 @@ ENDIF
 
 IF (FIELD_STATISTICS_ENABLE) CALL FIELD_STATISTICS_DEVICE_ALLOCATE (SIZE (DEV, KIND=JPIB) * INT (KIND (DEV), KIND=JPIB))
 
-END SUBROUTINE ${ft.name}$_DEV_ALLOCATE_DIM
+END SUBROUTINE ${ft.name}$_DEV_ALLOCATE
+
+SUBROUTINE ${ft.name}$_DEV_ALLOCATE_POOLED (DEV, UBOUNDS, BLKID, MAP_DEVPTR, LBOUNDS)
+
+USE FIELD_STATISTICS_MODULE
+$:offload_macros.get_device_id_import()
+
+${ft.type}$, POINTER :: DEV(${ft.shape}$)
+INTEGER (KIND=JPIM), INTENT (IN) :: UBOUNDS (${ft.rank}$)
+INTEGER(KIND=JPIM), INTENT(INOUT) :: BLKID
+LOGICAL, INTENT(IN) :: MAP_DEVPTR
+INTEGER (KIND=JPIM), INTENT (IN), OPTIONAL :: LBOUNDS (${ft.rank}$)
+
+INTEGER (KIND=JPIM) :: ILBOUNDS (${ft.rank}$), ISHAPE (${ft.rank}$), STAT
+INTEGER (C_SIZE_T) :: SIZ
+TYPE(C_PTR) :: DATA
+TYPE(C_PTR) :: HST_DATA
+INTEGER (KIND=C_INT) :: ERR, DEV_ID
+INTEGER (KIND=C_SIZE_T) :: OFFSET
+CHARACTER(LEN=20) :: DEVICE_POOL_BLOCK_SIZE
+INTEGER(C_SIZE_T) :: DEVICE_POOL_BLOCK_SIZE_INT
+${ft.type}$, POINTER, CONTIGUOUS :: PTR(${ft.shape}$)
+#:if defined('WITH_HIC')
+$:offload_macros.runtime_error_decl(symbols=['ISTAT',])
+#:endif
+
+OFFSET = 0
+DEV_ID = -1
+ERR = 0
+$:offload_macros.get_device_id(dev_id='DEV_ID')
+ILBOUNDS = 1
+IF (PRESENT (LBOUNDS)) ILBOUNDS = LBOUNDS
+
+SIZ = KIND (DEV)
+#:for i in range (1, ft.rank+1, 1)
+ISHAPE(${i}$) = UBOUNDS(${i}$) - ILBOUNDS(${i}$) + 1
+SIZ = SIZ * INT (UBOUNDS(${i}$)-ILBOUNDS(${i}$)+1, C_SIZE_T)
+#:endfor
+
+IF ( .NOT. ASSOCIATED(DEVICE_POOL%START_BLK) ) THEN
+   DEVICE_POOL_DEVICE_ID = DEV_ID
+   ALLOCATE(DEVICE_MEM_BLOCK::DEVICE_POOL%START_BLK)
+   DEV_MEM_BLK_INIT => MEM_BLK_INIT
+   DEV_MEM_BLK_FINAL => MEM_BLK_FINAL
+
+   CALL GET_ENVIRONMENT_VARIABLE('FIELD_API_DEVICE_POOL_BLOCK_SIZE', DEVICE_POOL_BLOCK_SIZE, STATUS=STAT)
+   IF (STAT == 0) THEN
+      DEVICE_POOL_BLOCK_SIZE = TRIM(DEVICE_POOL_BLOCK_SIZE)
+      READ(DEVICE_POOL_BLOCK_SIZE, *) DEVICE_POOL_BLOCK_SIZE_INT
+      IF (DEVICE_POOL_BLOCK_SIZE_INT > 0) DEV_POOL_BLOCK_SIZE = DEVICE_POOL_BLOCK_SIZE_INT
+   ENDIF
+   DEVICE_POOL%START_BLK%SIZE = DEV_POOL_BLOCK_SIZE
+ENDIF
+IF (DEVICE_POOL_DEVICE_ID /= DEV_ID) CALL FIELD_ABORT('DEVICE POOL CANNOT BE SHARED BETWEEN DEVICES')
+
+IF(SIZ > 0)THEN
+   CALL DEVICE_POOL%ALLOC(SIZ, BLKID, DATA)
+
+   IF(MAP_DEVPTR)THEN
+     CALL DEV_MALLOC (SIZ, HST_DATA)
+     IF (.NOT. C_ASSOCIATED(HST_DATA)) CALL FIELD_ABORT('DEV_ALLOCATE_POOLED: HOST ALLOCATION FAILED')
+#:if defined('WITH_HIC')
+$:offload_macros.map_device_addr(hst_ptr='HST_DATA', dev_ptr='DATA', siz='SIZ', offset='OFFSET', dev_id='DEV_ID', return_val='ERR', indent=5)
+     IF (ERR /= 0) CALL FIELD_ABORT('DEV_ALLOCATE_POOLED: DEVICE ASSOCIATION FAILED')
+#:endif
+     CALL C_F_POINTER(HST_DATA, PTR, SHAPE=ISHAPE)
+   ELSE
+     CALL C_F_POINTER(DATA, PTR, SHAPE=ISHAPE)
+   ENDIF
+
+   DEV(${', '.join(map(lambda r: 'ILBOUNDS('+str(r+1)+'):', range(0, ft.rank)))}$) => PTR
+ELSE
+   ALLOCATE(DEV(${ ', '.join (f'ILBOUNDS({i}):UBOUNDS({i})' for i in  range (1, ft.rank+1)) }$))
+$:offload_macros.create(symbols=['DEV',], indent=3)
+ENDIF
+
+IF (FIELD_STATISTICS_ENABLE) CALL FIELD_STATISTICS_DEVICE_ALLOCATE (SIZE (DEV, KIND=JPIB) * INT (KIND (DEV), KIND=JPIB))
+
+END SUBROUTINE ${ft.name}$_DEV_ALLOCATE_POOLED
 
 SUBROUTINE ${ft.name}$_DEV_DEALLOCATE (DEV, MAP_DEVPTR)
 
@@ -137,6 +293,61 @@ $:offload_macros.dev_free(ptr='PTR', return_val='ISTAT', indent=6)
 ENDIF
 
 END SUBROUTINE ${ft.name}$_DEV_DEALLOCATE
+
+SUBROUTINE ${ft.name}$_DEV_DEALLOCATE_POOLED (DEV, BLKID, MAP_DEVPTR)
+
+USE FIELD_STATISTICS_MODULE
+$:offload_macros.get_device_id_import()
+
+${ft.type}$, POINTER :: DEV(${ft.shape}$)
+INTEGER (KIND=JPIM) :: LBOUNDS (${ft.rank}$), UBOUNDS (${ft.rank}$)
+INTEGER(KIND=JPIM), INTENT(INOUT) :: BLKID
+LOGICAL, INTENT(IN) :: MAP_DEVPTR
+INTEGER (C_SIZE_T) :: SIZ
+TYPE (C_PTR) :: PTR
+INTEGER (KIND=C_INT) :: ERR, DEV_ID
+#:if defined('WITH_HIC')
+$:offload_macros.runtime_error_decl(symbols=['ISTAT',])
+#:endif
+
+IF (.NOT. ASSOCIATED(DEV)) RETURN
+LBOUNDS = LBOUND(DEV)
+UBOUNDS = UBOUND(DEV)
+DEV_ID = -1
+ERR = 0
+$:offload_macros.get_device_id(dev_id='DEV_ID')
+IF (DEVICE_POOL_DEVICE_ID /= DEV_ID) CALL FIELD_ABORT('DEVICE POOL DEALLOCATION ON WRONG DEVICE')
+
+SIZ = KIND (DEV)
+#:for i in range (1, ft.rank+1, 1)
+SIZ = SIZ * (UBOUNDS(${i}$) - LBOUNDS(${i}$) + 1)
+#:endfor
+
+IF (ASSOCIATED (DEV)) THEN
+
+  IF (FIELD_STATISTICS_ENABLE) CALL FIELD_STATISTICS_DEVICE_DEALLOCATE (SIZE (DEV, KIND=JPIB) * INT (KIND (DEV), KIND=JPIB))
+
+  IF (SIZ > 0) THEN
+    IF (MAP_DEVPTR) THEN
+      PTR = C_LOC (DEV (${ ', '.join (map (lambda i: 'LBOUND (DEV, ' + str (i) + ')', range (1, ft.rank+1))) }$))
+#:if defined('WITH_HIC')
+$:offload_macros.unmap_device_addr(hst_ptr='PTR', dev_id='DEV_ID', return_val='ERR', indent=6)
+      IF (ERR /= 0) CALL FIELD_ABORT('DEV_DEALLOCATE_POOLED: DEVICE DISASSOCIATION FAILED')
+#:endif
+      CALL DEV_FREE(PTR)
+    ENDIF
+    CALL DEVICE_POOL%DEALLOC(BLKID)
+    BLKID = 0
+  ELSE
+$:offload_macros.delete(symbols=['DEV',], indent=4)
+    DEALLOCATE(DEV)
+  ENDIF
+
+  NULLIFY (DEV)
+
+ENDIF
+
+END SUBROUTINE ${ft.name}$_DEV_DEALLOCATE_POOLED
 
 #:endfor
 

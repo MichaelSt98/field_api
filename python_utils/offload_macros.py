@@ -599,3 +599,53 @@ def reinit_gpu_context(indent=0):
     method = _get_method(backend, 'reinit_gpu_context')
 
     return _format_lines(method(), indent=indent)
+
+def map_device_addr_intf(indent=0):
+    """
+    The ISO_C interface for mapping a device address to a host address.
+    """
+
+    backend = _get_offload_backend()
+    method = _get_method(backend, 'map_device_addr_intf')
+
+    return _format_lines(method(), indent=indent)
+
+def unmap_device_addr_intf(indent=0):
+    """
+    The ISO_C interface for unmapping device memory associated to a given host address.
+    """
+
+    backend = _get_offload_backend()
+    method = _get_method(backend, 'unmap_device_addr_intf')
+
+    return _format_lines(method(), indent=indent)
+
+def map_device_addr(hst_ptr, dev_ptr, siz, offset, dev_id, return_val="", indent=0):
+    """
+    Map device address to host address.
+    """
+
+    backend = _get_offload_backend()
+    method = _get_method(backend, 'map_device_addr')
+
+    return _format_lines(method(hst_ptr, dev_ptr, siz, offset, dev_id, return_val=return_val), indent=indent)
+
+def unmap_device_addr(hst_ptr, dev_id, return_val="", indent=0):
+    """
+    Unmap device memory associated to a given host address.
+    """
+
+    backend = _get_offload_backend()
+    method = _get_method(backend, 'unmap_device_addr')
+
+    return _format_lines(method(hst_ptr, dev_id, return_val=return_val), indent=indent)
+
+def get_device_id_import(indent=0):
+    """
+    Runtime API import for retrieving device ID.
+    """
+
+    backend = _get_offload_backend()
+    method = _get_method(backend, 'get_device_id_import')
+
+    return _format_lines(method(), indent=indent)

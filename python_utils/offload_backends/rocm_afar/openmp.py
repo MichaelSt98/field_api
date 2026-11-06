@@ -77,6 +77,41 @@ class ROCMAFAROpenMP():
         return f"{dev_id} = omp_get_default_device()"
 
     @classmethod
+    def get_device_id_import(cls):
+        return ""
+
+    @classmethod
+    def map_device_addr_intf(cls):
+        return [
+            "INTEGER(C_INT) FUNCTION FAPI_OMP_ASSOCIATE(HST_PTR, DEV_PTR, SIZ, OFFSET, DEV_ID) &",
+            "  & BIND(C, NAME='omp_target_associate_ptr')",
+            "  IMPORT :: C_PTR, C_SIZE_T, C_INT",
+            "  TYPE(C_PTR), VALUE, INTENT(IN) :: HST_PTR, DEV_PTR",
+            "  INTEGER(C_SIZE_T), VALUE, INTENT(IN) :: SIZ, OFFSET",
+            "  INTEGER(C_INT), VALUE, INTENT(IN) :: DEV_ID",
+            "END FUNCTION FAPI_OMP_ASSOCIATE",
+        ]
+
+    @classmethod
+    def unmap_device_addr_intf(cls):
+        return [
+            "INTEGER(C_INT) FUNCTION FAPI_OMP_DISASSOCIATE(HST_PTR, DEV_ID) &",
+            "  & BIND(C, NAME='omp_target_disassociate_ptr')",
+            "  IMPORT :: C_PTR, C_INT",
+            "  TYPE(C_PTR), VALUE, INTENT(IN) :: HST_PTR",
+            "  INTEGER(C_INT), VALUE, INTENT(IN) :: DEV_ID",
+            "END FUNCTION FAPI_OMP_DISASSOCIATE",
+        ]
+
+    @classmethod
+    def map_device_addr(cls, hst_ptr, dev_ptr, siz, offset, dev_id, return_val):
+        return f"{return_val} = FAPI_OMP_ASSOCIATE({hst_ptr}, {dev_ptr}, {siz}, {offset}, {dev_id})"
+
+    @classmethod
+    def unmap_device_addr(cls, hst_ptr, dev_id, return_val):
+        return f"{return_val} = FAPI_OMP_DISASSOCIATE({hst_ptr}, {dev_id})"
+
+    @classmethod
     def get_host_id(cls, hst_id):
         """
         Get device number corresponding to CPU.
